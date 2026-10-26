@@ -1,0 +1,24 @@
+{
+  "webPort": 8787,
+  "bindAddress": "127.0.0.1",
+  "staleAfterSeconds": 60,
+  "pushallMinIntervalSeconds": 120,
+  "exposeRawReports": true,
+  "enableHistory": false,
+  "historyIntervalSeconds": 30,
+  "historyRetentionDays": 30,
+  "printers": [
+    {
+      "name": "X1 Carbon",
+      "ip": "192.168.1.123",
+      "serial": "REPLACE_ME",
+      "accessCode": "REPLACE_ME"
+    },
+    {
+      "name": "P1S Workshop",
+      "ip": "192.168.1.124",
+      "serial": "REPLACE_ME",
+      "accessCode": "REPLACE_ME"
+    }
+  ]
+}

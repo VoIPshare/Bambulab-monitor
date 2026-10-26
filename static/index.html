@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Bambu LAN Monitor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="wrap">
+    <header class="topbar">
+      <div><h1>Bambu LAN Monitor Pro</h1><div class="subtitle">Local multi-printer dashboard · temperatures, AMS, progress</div></div>
+      <div class="toolbar">
+        <select id="filter" class="control" aria-label="Filter printers"><option value="all">All printers</option><option value="printing">Printing</option><option value="offline">Offline</option><option value="error">Errors</option></select>
+        <button id="refreshButton" class="control" type="button">Refresh</button>
+        <span id="refresh" class="muted">Loading…</span>
+      </div>
+    </header>
+    <div id="demoBanner" class="banner"></div>
+    <section id="summary" class="summary" aria-label="Fleet summary"></section>
+    <section id="printers" class="printer-grid" aria-live="polite"></section>
+    <footer>Read-only, local network only. The daemon only sends the Bambu "pushall" status request.</footer>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

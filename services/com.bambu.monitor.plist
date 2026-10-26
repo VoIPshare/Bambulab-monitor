@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.bambu.monitor</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/USERNAME/bambu-lan-monitor/.venv/bin/python</string>
+    <string>/Users/USERNAME/bambu-lan-monitor/server.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/USERNAME/bambu-lan-monitor</string>
+  <key>EnvironmentVariables</key><dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/USERNAME/bambu-lan-monitor/data/server.log</string>
+  <key>StandardErrorPath</key><string>/Users/USERNAME/bambu-lan-monitor/data/server.log</string>
+</dict></plist>

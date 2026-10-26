@@ -1,0 +1,22 @@
+[Unit]
+Description=Bambu LAN Monitor (local printer dashboard)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bambu
+Group=bambu
+WorkingDirectory=/opt/bambu-lan-monitor
+ExecStart=/opt/bambu-lan-monitor/.venv/bin/python /opt/bambu-lan-monitor/server.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/bambu-lan-monitor/data
+
+[Install]
+WantedBy=multi-user.target

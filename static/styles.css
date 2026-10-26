@@ -34,6 +34,21 @@ button.control:hover { border-color:#4a5a70; }
 .printer-body { padding:18px; }
 .hero { display:grid; grid-template-columns:120px 1fr; gap:16px; align-items:center; background:linear-gradient(140deg,#172333,#111720); border-radius:13px; padding:15px; }
 .printer-icon { width:98px; height:98px; display:grid; place-items:center; border-radius:22px; background:#0f151d; font-size:3rem; }
+.printer-icon { overflow:hidden; }
+.printer-icon img { width:100%; height:100%; object-fit:contain; }
+.section-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.section-head h3 { margin:0; }
+.size-picker { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+.size-picker button { background:none; border:0; color:var(--muted); cursor:pointer; padding:4px 10px; font-size:.8rem; }
+.size-picker button + button { border-left:1px solid var(--line); }
+.size-picker button.active { background:#1f2a38; color:var(--text); }
+.no-preview { font-size:.75rem; color:var(--muted); text-align:center; padding:6px; }
+.camera.size-s { width:40%; min-width:180px; max-width:100%; margin:auto; }
+.camera.size-m { width:70%; min-width:240px; max-width:100%; margin:auto; }
+.camera { aspect-ratio:16/9; background:#0b1016; border:1px solid #232c38; border-radius:11px; overflow:hidden; display:grid; place-items:center; }
+.camera img { width:100%; height:100%; object-fit:contain; display:block; }
+.camera img[hidden], .camera-msg[hidden] { display:none; }
+.camera-msg { color:var(--muted); padding:14px; text-align:center; font-size:.9rem; }
 .job { font-weight:720; font-size:1.15rem; overflow-wrap:anywhere; }
 .progress-track,.gauge-track { background:#2b3543; border-radius:999px; overflow:hidden; }
 .progress-track { height:11px; margin-top:11px; }

@@ -1,19 +1,22 @@
 "use strict";
 const DEMO = location.protocol === "file:" || new URLSearchParams(location.search).get("demo") === "1";
 const REFRESH_MS = 2000;
+const CAMERA_MS = 1000;
 const state = { filter: "all", printers: [], summary: null };
 const $ = selector => document.querySelector(selector);
 
 const demoPrinters = [
-  {id:1,name:"X1 Carbon",ip:"192.168.1.123",connected:true,stale:false,reconnects:0,lastError:null,updatedAt:new Date().toISOString(),state:"RUNNING",file:"Benchy.3mf",progress:72,remainingMinutes:78,layer:142,totalLayers:198,nozzleTemp:220,nozzleTarget:220,bedTemp:60,bedTarget:60,chamberTemp:35,wifiSignal:"-55dBm",speedLevel:2,printError:0,hmsCount:0,activeTray:"0",ams:[
+  {id:1,name:"X1 Carbon",ip:"192.168.1.123",connected:true,camera:true,platePreview:false,stale:false,reconnects:0,lastError:null,updatedAt:new Date().toISOString(),state:"RUNNING",file:"Benchy.3mf",progress:72,remainingMinutes:78,layer:142,totalLayers:198,nozzleTemp:220,nozzleTarget:220,bedTemp:60,bedTarget:60,chamberTemp:35,wifiSignal:"-55dBm",speedLevel:2,printError:0,hmsCount:0,activeTray:"0",ams:[
     {unitId:0,slotId:0,color:"#161616",type:"PLA",material:"PLA Basic",remaining:78,humidity:2,temperature:26,loaded:true,active:true},
     {unitId:0,slotId:1,color:"#f4f4f4",type:"PLA",material:"PLA Matte",remaining:45,humidity:2,temperature:26,loaded:true,active:false},
     {unitId:0,slotId:2,color:"#2775d8",type:"PETG",material:"PETG HF",remaining:62,humidity:2,temperature:26,loaded:true,active:false},
     {unitId:0,slotId:3,color:"#666666",type:null,material:null,remaining:null,humidity:2,temperature:26,loaded:false,active:false}
   ],raw:{print:{gcode_state:"RUNNING",mc_percent:72}}},
-  {id:2,name:"P1S Workshop",ip:"192.168.1.124",connected:false,stale:true,reconnects:2,lastError:null,updatedAt:null,state:null,file:null,progress:null,remainingMinutes:null,layer:null,totalLayers:null,nozzleTemp:null,nozzleTarget:null,bedTemp:null,bedTarget:null,chamberTemp:null,wifiSignal:null,speedLevel:null,printError:null,hmsCount:0,activeTray:null,ams:[],raw:null}
+  {id:2,name:"P1S Workshop",ip:"192.168.1.124",connected:false,camera:true,platePreview:false,stale:true,reconnects:2,lastError:null,updatedAt:null,state:null,file:null,progress:null,remainingMinutes:null,layer:null,totalLayers:null,nozzleTemp:null,nozzleTarget:null,bedTemp:null,bedTarget:null,chamberTemp:null,wifiSignal:null,speedLevel:null,printError:null,hmsCount:0,activeTray:null,ams:[],raw:null}
 ];
 
+const CAMERA_SIZES = {off:"Off",s:"S",m:"M",l:"L"};
+const cameraSizes = (() => { try { return JSON.parse(localStorage.getItem("cameraSizes")) || {}; } catch { return {}; } })();
 const SPEED = {1:"Silent",2:"Standard",3:"Sport",4:"Ludicrous"};
 function esc(value){ return String(value ?? "—").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function number(value, fallback=0){ const n=Number(value); return Number.isFinite(n)?n:fallback; }
@@ -33,18 +36,36 @@ function badge(p){
 function tempColor(value){ const n=number(value); return n>=200?"#ff727e":n>=70?"#ffbd59":"#52d6a0"; }
 function gauge(name,current,target,max){ const currentText=current==null?"—":`${current}°C`; const targetText=target==null||target===0?"":` / ${target}°C`; return `<div class="gauge"><div class="label">${name}</div><div class="value">${esc(currentText)}<span class="muted">${esc(targetText)}</span></div><div class="gauge-track"><div class="gauge-fill" style="width:${clamp(number(current)/max*100,0,100)}%;background:${tempColor(current)}"></div></div></div>`; }
 function renderAMS(slots){ if(!slots?.length)return '<div class="empty">No AMS data reported.</div>'; return `<div class="ams-grid">${slots.map(s=>`<div class="ams-slot ${s.active?"active":""}"><div class="ams-title"><span class="swatch" style="background:${esc(s.color||"#666")}"></span><strong>AMS ${esc(number(s.unitId)+1)} · Slot ${esc(number(s.slotId)+1)}</strong></div><div class="value">${s.loaded?esc(s.type||s.material||"Loaded"):"Empty"}</div><div class="muted">${s.loaded?`${esc(s.material||"")}${s.remaining!=null?` · ${esc(s.remaining)}% left`:""}`:"No filament"}</div><div class="muted">Humidity ${esc(s.humidity)} · ${s.temperature==null?"—":esc(s.temperature)+"°C"}</div></div>`).join("")}</div>`; }
+function renderCamera(p){
+  if(!p.camera) return "";
+  const size=CAMERA_SIZES[cameraSizes[p.id]]?cameraSizes[p.id]:"l";
+  const message=DEMO?"Live camera appears here when server.py is running.":"Connecting to camera…";
+  const picker=Object.entries(CAMERA_SIZES).map(([key,label])=>`<button type="button" class="${key===size?"active":""}" data-camera-size="${key}" data-printer="${p.id}" aria-pressed="${key===size}">${label}</button>`).join("");
+  // Keyed by size too, so a new size gets a fresh node with the right class.
+  return `<section class="section"><div class="section-head"><h3>Camera</h3><div class="size-picker" role="group" aria-label="Camera size">${picker}</div></div>${size==="off"?"":`<div class="camera size-${size}" data-keep="camera-${p.id}-${size}" data-camera="${p.id}"><img alt="Live camera of ${esc(p.name)}" hidden><div class="camera-msg">${message}</div></div>`}</section>`;
+}
+function renderIcon(p){
+  if(!p.platePreview||!p.file) return '<div class="printer-icon" aria-hidden="true">▣</div>';
+  return `<div class="printer-icon" data-keep="preview-${p.id}-${esc(p.file)}" data-preview="${p.id}" title="Plate preview">▣</div>`;
+}
 function renderPrinter(p){
   const percent=clamp(number(p.progress),0,100);
   const alert = !p.connected && p.lastError ? `<div class="alert">${esc(p.lastError)}</div>` : "";
-  return `<article class="printer"><div class="printer-head"><div><div class="printer-name">${esc(p.name)}</div><div class="muted">${esc(p.ip)}</div></div>${badge(p)}</div><div class="printer-body">${alert}<div class="hero"><div class="printer-icon" aria-hidden="true">▣</div><div><div class="label">Current job</div><div class="job">${esc(p.file||"No active job")}</div><div class="value">${p.progress==null?"—":esc(percent)+"%"} <span class="muted small">${esc(printing(p.state)?eta(p.remainingMinutes):"")}</span></div><div class="progress-track"><div class="progress-fill" style="width:${percent}%"></div></div></div></div><div class="metric-grid"><div class="metric"><div class="label">State</div><div class="value">${esc(p.state||(p.connected?"Waiting":"—"))}</div></div><div class="metric"><div class="label">Time remaining</div><div class="value">${esc(printing(p.state)?remaining(p.remainingMinutes):"—")}</div></div><div class="metric"><div class="label">Layers</div><div class="value">${esc(p.layer)} / ${esc(p.totalLayers)}</div></div><div class="metric"><div class="label">Last report</div><div class="value">${esc(age(p.updatedAt))}</div></div></div><section class="section"><h3>Temperatures</h3><div class="gauges">${gauge("Nozzle",p.nozzleTemp,p.nozzleTarget,300)}${gauge("Bed",p.bedTemp,p.bedTarget,120)}${gauge("Chamber",p.chamberTemp,null,80)}</div></section><section class="section"><h3>AMS</h3>${renderAMS(p.ams)}</section><section class="section"><h3>Details</h3><div class="details"><div class="detail"><span>Wi-Fi</span><strong>${esc(p.wifiSignal)}</strong></div><div class="detail"><span>Speed</span><strong>${esc(SPEED[p.speedLevel]||p.speedLevel)}</strong></div><div class="detail"><span>Print error</span><strong>${esc(p.printError)}</strong></div><div class="detail"><span>HMS alerts</span><strong>${esc(p.hmsCount)}</strong></div><div class="detail"><span>Reconnects</span><strong>${esc(p.reconnects)}</strong></div></div></section><details><summary>Raw MQTT report</summary><pre>${esc(p.raw==null?"No report received":JSON.stringify(p.raw,null,2))}</pre></details></div></article>`;
+  return `<article class="printer"><div class="printer-head"><div><div class="printer-name">${esc(p.name)}</div><div class="muted">${esc(p.ip)}</div></div>${badge(p)}</div><div class="printer-body">${alert}<div class="hero">${renderIcon(p)}<div><div class="label">Current job</div><div class="job">${esc(p.file||"No active job")}</div><div class="value">${p.progress==null?"—":esc(percent)+"%"} <span class="muted small">${esc(printing(p.state)?eta(p.remainingMinutes):"")}</span></div><div class="progress-track"><div class="progress-fill" style="width:${percent}%"></div></div></div></div><div class="metric-grid"><div class="metric"><div class="label">State</div><div class="value">${esc(p.state||(p.connected?"Waiting":"—"))}</div></div><div class="metric"><div class="label">Time remaining</div><div class="value">${esc(printing(p.state)?remaining(p.remainingMinutes):"—")}</div></div><div class="metric"><div class="label">Layers</div><div class="value">${esc(p.layer)} / ${esc(p.totalLayers)}</div></div><div class="metric"><div class="label">Last report</div><div class="value">${esc(age(p.updatedAt))}</div></div></div>${renderCamera(p)}<section class="section"><h3>Temperatures</h3><div class="gauges">${gauge("Nozzle",p.nozzleTemp,p.nozzleTarget,300)}${gauge("Bed",p.bedTemp,p.bedTarget,120)}${gauge("Chamber",p.chamberTemp,null,80)}</div></section><section class="section"><h3>AMS</h3>${renderAMS(p.ams)}</section><section class="section"><h3>Details</h3><div class="details"><div class="detail"><span>Wi-Fi</span><strong>${esc(p.wifiSignal)}</strong></div><div class="detail"><span>Speed</span><strong>${esc(SPEED[p.speedLevel]||p.speedLevel)}</strong></div><div class="detail"><span>Print error</span><strong>${esc(p.printError)}</strong></div><div class="detail"><span>HMS alerts</span><strong>${esc(p.hmsCount)}</strong></div><div class="detail"><span>Reconnects</span><strong>${esc(p.reconnects)}</strong></div></div></section><details><summary>Raw MQTT report</summary><pre>${esc(p.raw==null?"No report received":JSON.stringify(p.raw,null,2))}</pre></details></div></article>`;
 }
 function calculateSummary(printers){ return {online:printers.filter(p=>p.connected).length,total:printers.length,activePrints:printers.filter(p=>printing(p.state)).length,amsSlots:printers.flatMap(p=>p.ams||[]).filter(s=>s.loaded).length,errors:printers.filter(p=>hasError(p.printError)).length,historyEnabled:false}; }
 function renderSummary(s){ $("#summary").innerHTML=[["Online",`${s.online} / ${s.total}`],["Active prints",s.activePrints],["AMS slots loaded",s.amsSlots],["Errors",s.errors],["History",s.historyEnabled?"On":"Off"]].map(([label,value])=>`<div class="summary-card"><div class="label">${label}</div><div class="number">${esc(value)}</div></div>`).join(""); }
+// Camera and preview nodes survive re-renders so the images don't flicker or reload.
+function keepNodes(update){
+  const saved=new Map([...document.querySelectorAll("[data-keep]")].map(el=>[el.dataset.keep,el]));
+  update();
+  document.querySelectorAll("[data-keep]").forEach(el=>{ const old=saved.get(el.dataset.keep); if(old&&old!==el) el.replaceWith(old); });
+}
 function render(){
   const f=state.filter;
   const filtered=state.printers.filter(p=>f==="all"||(f==="printing"&&printing(p.state))||(f==="offline"&&!p.connected)||(f==="error"&&hasError(p.printError)));
   // Keep the order from config.json so cards don't jump around.
-  $("#printers").innerHTML=filtered.length?[...filtered].sort((a,b)=>a.id-b.id).map(renderPrinter).join(""):'<div class="empty">No printers match this filter.</div>';
+  keepNodes(()=>{ $("#printers").innerHTML=filtered.length?[...filtered].sort((a,b)=>a.id-b.id).map(renderPrinter).join(""):'<div class="empty">No printers match this filter.</div>'; });
   renderSummary(state.summary||calculateSummary(state.printers));
   const active=state.printers.filter(p=>printing(p.state)).length;
   document.title = active ? `(${active} printing) Bambu LAN Monitor` : "Bambu LAN Monitor";
@@ -67,6 +88,46 @@ async function refresh(){
     $("#demoBanner").style.display="block";
   }
 }
+async function errorText(response){ try { return (await response.json()).error; } catch { return `HTTP ${response.status}`; } }
+async function updateCamera(el){
+  const img=el.querySelector("img"), msg=el.querySelector(".camera-msg");
+  const show=text=>{ img.hidden=!!text; msg.hidden=!text; if(text) msg.textContent=text; };
+  const response=await fetch(`/api/camera/${el.dataset.camera}.jpg`,{cache:"no-store"});
+  if(!response.ok){ show(await errorText(response)); return; }
+  const url=URL.createObjectURL(await response.blob());
+  img.onload=()=>{ if(el.dataset.url) URL.revokeObjectURL(el.dataset.url); el.dataset.url=url; show(""); };
+  img.src=url;
+}
+async function updatePreview(el){
+  el.dataset.state="loading";
+  const response=await fetch(`/api/preview/${el.dataset.preview}.png`,{cache:"no-store"});
+  if(!response.ok){
+    el.title=await errorText(response);
+    if(!el.title.startsWith("Loading")) el.innerHTML='<span class="no-preview">No preview</span>';
+    // 503 while the daemon is still downloading the .3mf; retry later.
+    setTimeout(()=>delete el.dataset.state, el.title.startsWith("Loading")?3000:30000);
+    return;
+  }
+  el.innerHTML=`<img alt="Plate preview" src="${URL.createObjectURL(await response.blob())}">`;
+  el.title="Plate preview";
+  el.dataset.state="done";
+}
+const cameraBusy=new WeakSet();
+function updateMedia(){
+  if(DEMO||document.hidden) return;
+  document.querySelectorAll("[data-camera]").forEach(el=>{
+    if(cameraBusy.has(el)) return;
+    cameraBusy.add(el);
+    updateCamera(el).catch(()=>{}).finally(()=>cameraBusy.delete(el));
+  });
+  document.querySelectorAll("[data-preview]:not([data-state])").forEach(el=>updatePreview(el).catch(()=>delete el.dataset.state));
+}
+$("#printers").addEventListener("click",event=>{
+  const button=event.target.closest("[data-camera-size]"); if(!button) return;
+  cameraSizes[button.dataset.printer]=button.dataset.cameraSize;
+  try { localStorage.setItem("cameraSizes",JSON.stringify(cameraSizes)); } catch {}
+  render();
+});
 $("#filter").addEventListener("change",event=>{state.filter=event.target.value;render();});
 $("#refreshButton").addEventListener("click",()=>{ document.querySelectorAll("details[open]").forEach(d=>d.open=false); refresh(); });
-refresh(); if(!DEMO)setInterval(refresh,REFRESH_MS);
+refresh(); if(!DEMO){ setInterval(refresh,REFRESH_MS); setInterval(updateMedia,CAMERA_MS); }

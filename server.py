@@ -8,26 +8,37 @@ LAN MQTT and serves a dashboard to your browser. No cloud, no external services.
 - paho-mqtt TLS connection to each printer (port 8883, user "bblp", LAN access code)
 - Flask API + static dashboard, served by Waitress when installed
 - Optional SQLite history (standard-library sqlite3)
+- Plate preview image read from the job's .3mf over the printer's FTPS (port 990)
+- Live camera snapshots: TLS JPEG stream on port 6000 (P1/A1) or RTSPS on port 322 via ffmpeg (X1/H2)
 """
 
 from __future__ import annotations
 
 import argparse
+import ftplib
 import json
 import logging
 import os
+import re
+import shutil
 import signal
+import socket
 import sqlite3
 import ssl
+import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
+import zipfile
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
 import paho.mqtt.client as mqtt
 
 ROOT = Path(__file__).resolve().parent
@@ -35,6 +46,10 @@ DEFAULT_CONFIG_PATH = ROOT / "config.json"
 DATA_DIR = ROOT / "data"
 STATIC_DIR = ROOT / "static"
 VERSION = "2.1.0"
+CAMERA_MODES = ("auto", "tcp", "rtsp", "off")
+CAMERA_IDLE_SECONDS = 30
+CAMERA_FRAME_MAX_AGE = 15
+JPEG_START, JPEG_END = b"\xff\xd8", b"\xff\xd9"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOG = logging.getLogger("bambu-monitor")
@@ -67,6 +82,10 @@ def load_config(path: Path) -> dict[str, Any]:
             raise SystemExit(f"Duplicate serial in printers[{index}] ({printer['name']})")
         serials.add(printer["serial"])
         printer["port"] = int(printer.get("port", 8883))
+        camera = "off" if printer.get("camera") is False else str(printer.get("camera", "auto")).strip().lower()
+        if camera not in CAMERA_MODES:
+            raise SystemExit(f"printers[{index}].camera must be one of {', '.join(CAMERA_MODES)} ({printer['name']})")
+        printer["camera"] = camera
     return config
 
 
@@ -152,6 +171,263 @@ def extract_ams(print_state: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]
     return active_tray, slots
 
 
+def read_exact(sock: socket.socket, size: int) -> bytes:
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise ConnectionError("camera closed the connection (wrong access code?)")
+        data += chunk
+    return bytes(data)
+
+
+# --------------------------------------------------------------------------- camera
+
+class CameraFeed:
+    """Pulls frames from one printer's camera, only while someone is looking at it."""
+
+    def __init__(self, cfg: dict[str, Any], stop_event: threading.Event):
+        self.cfg = cfg
+        self.stop_event = stop_event
+        self.lock = threading.Lock()
+        self.frame: bytes | None = None
+        self.frame_at = 0.0
+        self.error: str | None = None
+        self.last_viewed = 0.0
+        self.thread: threading.Thread | None = None
+        self.process: subprocess.Popen | None = None
+
+    def stop(self) -> None:
+        # The printer allows few RTSP viewers; a leftover ffmpeg would block the next daemon.
+        process = self.process
+        if process is not None and process.poll() is None:
+            process.kill()
+
+    def snapshot(self) -> tuple[bytes | None, str | None]:
+        with self.lock:
+            self.last_viewed = time.time()
+            if self.thread is None or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._run, daemon=True, name=f"camera-{self.cfg['name']}")
+                self.thread.start()
+            fresh = time.time() - self.frame_at < CAMERA_FRAME_MAX_AGE
+            return (self.frame if fresh else None), self.error
+
+    def _watched(self) -> bool:
+        return not self.stop_event.is_set() and time.time() - self.last_viewed < CAMERA_IDLE_SECONDS
+
+    def _store(self, frame: bytes) -> None:
+        with self.lock:
+            self.frame = frame
+            self.frame_at = time.time()
+            self.error = None
+
+    def _transport(self) -> str:
+        if self.cfg["camera"] != "auto":
+            return self.cfg["camera"]
+        model = str(self.cfg.get("model") or "").upper().replace(" ", "")
+        if model.startswith(("P1", "A1")):
+            return "tcp"
+        if model.startswith(("X1", "H2", "P2")):
+            return "rtsp"
+        # Unknown model: RTSP (port 322) is open when Liveview is on; P2S also listens on 6000 but rejects
+        # the P1/A1 login, so check 322 first. P1/A1 only have 6000.
+        for port, transport in ((322, "rtsp"), (6000, "tcp")):
+            try:
+                with socket.create_connection((self.cfg["ip"], port), timeout=3):
+                    return transport
+            except OSError:
+                pass
+        return "rtsp"
+
+    def _run(self) -> None:
+        while self._watched():
+            try:
+                if self._transport() == "tcp":
+                    self._run_tcp()
+                else:
+                    self._run_rtsp()
+            except Exception as exc:
+                with self.lock:
+                    self.error = str(exc) or type(exc).__name__
+                LOG.warning("[%s] camera: %s", self.cfg["name"], self.error)
+            if self._watched():
+                self.stop_event.wait(5)
+        with self.lock:
+            self.frame = None
+
+    def _run_tcp(self) -> None:
+        """P1/A1: TLS on port 6000, an 80-byte login, then 16-byte header + JPEG per frame."""
+        ip = self.cfg["ip"]
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        try:
+            raw = socket.create_connection((ip, 6000), timeout=10)
+        except OSError as exc:
+            raise ConnectionError(f"Cannot reach camera at {ip}:6000 ({exc})") from exc
+        with raw, context.wrap_socket(raw, server_hostname=ip) as sock:
+            sock.sendall(struct.pack("<IIII", 0x40, 0x3000, 0, 0)
+                         + b"bblp".ljust(32, b"\0") + self.cfg["accessCode"].encode().ljust(32, b"\0"))
+            while self._watched():
+                size = int.from_bytes(read_exact(sock, 16)[:4], "little")
+                if not 0 < size < 10_000_000:
+                    raise ConnectionError(f"unexpected camera frame size {size}")
+                payload = read_exact(sock, size)
+                if payload.startswith(JPEG_START) and payload.endswith(JPEG_END):
+                    self._store(payload)
+
+    def _run_rtsp(self) -> None:
+        """X1/H2: RTSPS on port 322, converted to JPEG frames by ffmpeg."""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("ffmpeg not found; install it to see this printer's camera (RTSP)")
+        url = f"rtsps://bblp:{quote(self.cfg['accessCode'], safe='')}@{self.cfg['ip']}:322/streaming/live/1"
+        process = subprocess.Popen(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp", "-timeout", "10000000",
+             "-i", url, "-an", "-vf", "fps=2", "-c:v", "mjpeg", "-q:v", "5", "-f", "image2pipe", "-"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.process = process
+        got_frame = False
+        try:
+            buffer = b""
+            while self._watched():
+                chunk = process.stdout.read1(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+                while (start := buffer.find(JPEG_START)) >= 0 and (end := buffer.find(JPEG_END, start + 2)) >= 0:
+                    self._store(buffer[start:end + 2])
+                    got_frame = True
+                    buffer = buffer[end + 2:]
+                if len(buffer) > 10_000_000:
+                    buffer = b""
+        finally:
+            process.kill()
+            _, stderr = process.communicate()
+            self.process = None
+        if self._watched():
+            detail = stderr.decode("utf-8", "replace").strip().splitlines()
+            hint = "" if got_frame else " (is LAN Mode Liveview enabled on the printer?)"
+            raise ConnectionError(f"RTSP stream ended: {detail[-1] if detail else 'no data'}{hint}")
+
+
+# --------------------------------------------------------------------------- plate preview
+
+class ImplicitFTPS(ftplib.FTP_TLS):
+    """Bambu printers speak implicit FTPS on port 990 and require TLS session reuse for data."""
+
+    def __init__(self):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        super().__init__(context=context, timeout=15)
+        self._sock: socket.socket | None = None
+
+    @property
+    def sock(self):
+        return self._sock
+
+    @sock.setter
+    def sock(self, value):
+        if value is not None and not isinstance(value, ssl.SSLSocket):
+            value = self.context.wrap_socket(value)
+        self._sock = value
+
+    def ntransfercmd(self, cmd, rest=None):
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.context.wrap_socket(conn, server_hostname=self.host, session=self.sock.session)
+        return conn, size
+
+
+def job_stem(name: str) -> str:
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    for suffix in (".gcode.3mf", ".3mf", ".gcode"):
+        if base.lower().endswith(suffix):
+            return base[:-len(suffix)]
+    return base
+
+
+def fetch_plate_preview(cfg: dict[str, Any], subtask: str | None, gcode_file: str | None) -> bytes:
+    """Download the job's .3mf from the printer and return its plate PNG."""
+    wanted = {job_stem(n) for n in (subtask, gcode_file) if n and not n.startswith("/data/")}
+    match = re.search(r"plate_(\d+)", gcode_file or "")
+    plate = match.group(1) if match else "1"
+    ftp = ImplicitFTPS()
+    try:
+        ftp.connect(cfg["ip"], 990)
+        ftp.login("bblp", cfg["accessCode"])
+        ftp.prot_p()
+        path = None
+        for folder in ("/", "/cache"):
+            try:
+                names = ftp.nlst(folder)
+            except ftplib.error_perm:
+                continue
+            path = next((f"{folder.rstrip('/')}/{n.rsplit('/', 1)[-1]}" for n in names
+                         if n.lower().endswith(".3mf") and job_stem(n) in wanted), None)
+            if path:
+                break
+        if path is None:
+            if (gcode_file or "").startswith("/data/"):
+                raise FileNotFoundError(f"{subtask or gcode_file} was sent without saving it to the printer's storage, "
+                                        "so there is no .3mf to read the preview from")
+            raise FileNotFoundError(f"{subtask or gcode_file}.3mf not found on the printer")
+        with tempfile.TemporaryFile() as tmp:
+            ftp.retrbinary(f"RETR {path}", tmp.write)
+            tmp.seek(0)
+            with zipfile.ZipFile(tmp) as archive:
+                names = archive.namelist()
+                image = next((n for n in (f"Metadata/plate_{plate}.png", "Metadata/plate_1.png") if n in names),
+                             next((n for n in names if re.fullmatch(r"Metadata/plate_\d+\.png", n)), None))
+                if image is None:
+                    raise FileNotFoundError("No plate preview inside the .3mf")
+                return archive.read(image)
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            ftp.close()
+
+
+class PlatePreview:
+    """Caches one plate image per job; downloads in the background on first request."""
+
+    def __init__(self, cfg: dict[str, Any]):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.key: tuple[Any, Any] | None = None
+        self.image: bytes | None = None
+        self.error: str | None = None
+        self.failed_at = 0.0
+        self.loading = False
+
+    def get(self, subtask: str | None, gcode_file: str | None) -> tuple[bytes | None, str | None]:
+        key = (subtask, gcode_file)
+        with self.lock:
+            if key != self.key:
+                self.key, self.image, self.error, self.failed_at = key, None, None, 0.0
+            retry = self.error is not None and time.time() - self.failed_at > 120
+            if self.image is None and not self.loading and (self.error is None or retry):
+                self.loading = True
+                threading.Thread(target=self._load, args=(key,), daemon=True,
+                                 name=f"preview-{self.cfg['name']}").start()
+            return self.image, self.error
+
+    def _load(self, key: tuple[Any, Any]) -> None:
+        image, error = None, None
+        try:
+            image = fetch_plate_preview(self.cfg, *key)
+        except Exception as exc:
+            error = str(exc) or type(exc).__name__
+            LOG.warning("[%s] plate preview: %s", self.cfg["name"], error)
+        with self.lock:
+            self.loading = False
+            if key == self.key:
+                self.image, self.error, self.failed_at = image, error, time.time()
+
+
 # --------------------------------------------------------------------------- runtime
 
 @dataclass
@@ -168,6 +444,8 @@ class PrinterRuntime:
     last_state: str | None = None
     active_job: dict[str, Any] | None = None
     client: mqtt.Client | None = None
+    camera: CameraFeed | None = None
+    preview: PlatePreview | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -283,6 +561,11 @@ class BambuMonitor:
         )
         self.printers = [PrinterRuntime(i + 1, item) for i, item in enumerate(config["printers"])]
         self.stop_event = threading.Event()
+        for printer in self.printers:
+            if printer.config["camera"] != "off":
+                printer.camera = CameraFeed(printer.config, self.stop_event)
+            if config.get("enablePlatePreview", True) is not False:
+                printer.preview = PlatePreview(printer.config)
         self.threads: list[threading.Thread] = []
         self.started_at = time.time()
 
@@ -312,6 +595,8 @@ class BambuMonitor:
             except Exception:
                 LOG.exception("Final history write failed")
         for printer in self.printers:
+            if printer.camera:
+                printer.camera.stop()
             if printer.client:
                 try:
                     printer.client.disconnect()
@@ -480,6 +765,8 @@ class BambuMonitor:
                 "ip": printer.config["ip"],
                 "model": printer.config.get("model"),
                 "connected": printer.connected,
+                "camera": printer.camera is not None,
+                "platePreview": printer.preview is not None,
                 "stale": stale,
                 "reconnects": printer.reconnects,
                 "lastError": printer.last_error,
@@ -534,7 +821,7 @@ def create_app(monitor: BambuMonitor) -> Flask:
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+            "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'"
         )
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
@@ -583,6 +870,35 @@ def create_app(monitor: BambuMonitor) -> Flask:
         since = int((time.time() - hours * 3600) * 1000)
         return jsonify({"enabled": True, "printerId": printer_id, "hours": hours,
                         "rows": monitor.history.history(printer_id, since, limit)})
+
+    @app.get("/api/camera/<int:printer_id>.jpg")
+    def api_camera(printer_id: int):
+        printer = next((p for p in monitor.printers if p.id == printer_id), None)
+        if printer is None:
+            abort(404, description="Printer not found")
+        if printer.camera is None:
+            abort(404, description="Camera disabled in config.json")
+        frame, error = printer.camera.snapshot()
+        if frame is None:
+            return jsonify({"error": error or "Connecting to camera…"}), 503
+        return Response(frame, mimetype="image/jpeg")
+
+    @app.get("/api/preview/<int:printer_id>.png")
+    def api_preview(printer_id: int):
+        printer = next((p for p in monitor.printers if p.id == printer_id), None)
+        if printer is None:
+            abort(404, description="Printer not found")
+        if printer.preview is None:
+            abort(404, description="Plate preview disabled in config.json")
+        with printer.lock:
+            print_state = printer.state.get("print") if isinstance(printer.state.get("print"), dict) else {}
+            subtask, gcode_file = print_state.get("subtask_name"), print_state.get("gcode_file")
+        if not subtask and not gcode_file:
+            abort(404, description="No job on this printer")
+        image, error = printer.preview.get(subtask, gcode_file)
+        if image is None:
+            return jsonify({"error": error or "Loading plate preview…"}), 503
+        return Response(image, mimetype="image/png")
 
     @app.get("/api/jobs")
     def api_jobs():

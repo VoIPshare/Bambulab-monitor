@@ -7,15 +7,20 @@
   "enableHistory": false,
   "historyIntervalSeconds": 30,
   "historyRetentionDays": 30,
+  "enablePlatePreview": true,
   "printers": [
     {
       "name": "X1 Carbon",
+      "model": "X1C",
+      "camera": "auto",
       "ip": "192.168.1.123",
       "serial": "REPLACE_ME",
       "accessCode": "REPLACE_ME"
     },
     {
       "name": "P1S Workshop",
+      "model": "P1S",
+      "camera": "auto",
       "ip": "192.168.1.124",
       "serial": "REPLACE_ME",
       "accessCode": "REPLACE_ME"

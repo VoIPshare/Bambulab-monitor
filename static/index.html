@@ -10,18 +10,21 @@
 <body>
   <main class="wrap">
     <header class="topbar">
-      <div><h1>Bambu LAN Monitor Pro</h1><div class="subtitle">Local multi-printer dashboard · temperatures, AMS, progress</div></div>
+      <div><h1 data-i18n="title">Bambu LAN Monitor Pro</h1><div class="subtitle" data-i18n="subtitle">Local multi-printer dashboard · temperatures, AMS, progress</div></div>
       <div class="toolbar">
-        <select id="filter" class="control" aria-label="Filter printers"><option value="all">All printers</option><option value="printing">Printing</option><option value="offline">Offline</option><option value="error">Errors</option></select>
-        <button id="refreshButton" class="control" type="button">Refresh</button>
-        <span id="refresh" class="muted">Loading…</span>
+        <select id="filter" class="control" data-i18n-label="filterLabel" aria-label="Filter printers"><option value="all" data-i18n="filterAll">All printers</option><option value="printing" data-i18n="filterPrinting">Printing</option><option value="offline" data-i18n="filterOffline">Offline</option><option value="error" data-i18n="filterError">Errors</option></select>
+        <select id="lang" class="control" data-i18n-label="language" aria-label="Language"><option value="en">English</option><option value="fr">Français</option><option value="it">Italiano</option></select>
+        <button id="refreshButton" class="control" type="button" data-i18n="refresh">Refresh</button>
+        <span id="refresh" class="muted" data-i18n="loading">Loading…</span>
       </div>
     </header>
     <div id="demoBanner" class="banner"></div>
-    <section id="summary" class="summary" aria-label="Fleet summary"></section>
+    <section id="summary" class="summary" data-i18n-label="summaryLabel" aria-label="Fleet summary"></section>
     <section id="printers" class="printer-grid" aria-live="polite"></section>
-    <footer>Read-only, local network only. The daemon only sends the Bambu "pushall" status request.</footer>
+    <dialog id="modelDialog" class="model-dialog"><img id="modelImage" alt=""></dialog>
+    <footer data-i18n="footer">Read-only, local network only. The daemon only sends the Bambu "pushall" status request.</footer>
   </main>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -164,11 +164,27 @@ def extract_ams(print_state: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]
                 "material": tray.get("tray_sub_brands") or None,
                 "remaining": remain if isinstance(remain, (int, float)) and remain >= 0 else None,
                 "humidity": as_number(unit.get("humidity")),
+                # Newer firmware also reports the real %RH next to the 1-5 level.
+                "humidityPercent": as_number(unit.get("humidity_raw")),
                 "temperature": as_number(unit.get("temp")),
                 "loaded": loaded,
                 "active": active_tray is not None and global_index is not None and str(active_tray) == str(global_index),
             })
     return active_tray, slots
+
+
+def fan_percent(value: Any) -> int | None:
+    """Fan speeds are reported as a 0-15 level; Bambu Studio shows them in 10% steps."""
+    level = as_number(value)
+    return None if level is None else round(level / 15 * 10) * 10
+
+
+def job_started_ms(print_state: dict[str, Any], active_job: dict[str, Any] | None) -> int | None:
+    # Prefer the printer's own start time; fall back to when the daemon first saw the job.
+    started = as_number(print_state.get("gcode_start_time"))
+    if isinstance(started, (int, float)) and started > 0:
+        return int(started * 1000)
+    return active_job.get("started") if active_job else None
 
 
 def read_exact(sock: socket.socket, size: int) -> bytes:
@@ -789,6 +805,13 @@ class BambuMonitor:
                 "hmsCount": len(print_state.get("hms") or []) if isinstance(print_state.get("hms"), list) else 0,
                 "activeTray": active_tray,
                 "ams": ams,
+                "startedAt": None if (started := job_started_ms(print_state, printer.active_job)) is None
+                else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started / 1000)),
+                "fans": {
+                    "part": fan_percent(print_state.get("cooling_fan_speed")),
+                    "aux": fan_percent(print_state.get("big_fan1_speed")),
+                    "exhaust": fan_percent(print_state.get("big_fan2_speed")),
+                },
             }
             if self.expose_raw:
                 result["raw"] = printer.last_report
@@ -831,7 +854,7 @@ def create_app(monitor: BambuMonitor) -> Flask:
     def index():
         return send_from_directory(STATIC_DIR, "index.html")
 
-    @app.get("/<any('styles.css','app.js'):name>")
+    @app.get("/<any('styles.css','app.js','i18n.js'):name>")
     def static_file(name: str):
         return send_from_directory(STATIC_DIR, name)
 

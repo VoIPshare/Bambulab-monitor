@@ -11,6 +11,7 @@ A small local daemon that watches two or more Bambu Lab printers over your LAN a
 - Live camera view and the plate preview image of the current job
 - Read-only: the only thing ever sent to a printer is the standard "pushall" status request (the camera and plate preview only read from the printer)
 - Optional SQLite history and job log (Python's built-in `sqlite3`)
+- English, French and Italian interface (picked from your browser, switchable in the toolbar; strings live in `static/i18n.js`)
 - Runs as a service on Linux (systemd), macOS (launchd) and Windows (Task Scheduler)
 
 ## 1. Prepare each printer
